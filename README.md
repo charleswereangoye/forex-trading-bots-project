@@ -40,5 +40,10 @@ These bots are for educational and research purposes only. Forex trading involve
 
 ---
 
-Author: Charles Were  
-Focus: Algorithmic Trading | Forex | Automation
+Author: Charles Were Angoye
+Focus: Software Engineer | Forex Trader
+
+## 📄 License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+
