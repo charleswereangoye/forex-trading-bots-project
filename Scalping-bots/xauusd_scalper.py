@@ -11,7 +11,7 @@ SYMBOL = "XAUUSD"
 TIMEFRAME = mt5.TIMEFRAME_M1
 MAGIC_NUMBER = 10001
 SPREAD_LIMIT = 100
-LOT_FIXED = 0.01
+LOT_FIXED = 0.03
 BREAK_EVEN_BUFFER = 10  # points beyond entry
 ATR_PERIOD = 14
 ATR_MULTIPLIER_SL = 1.5  # SL = ATR * multiplier
@@ -108,17 +108,16 @@ def place_trade(signal, df):
     sl_points = max(int(atr * 1.5), symbol_info.trade_stops_level + 1)
     tp_points = sl_points * 2  # 2R take profit
 
-    # Correct pending order prices
     if signal == "buy":
-        price = tick.ask - 1 * POINT  # BUY_LIMIT must be BELOW market
+        price = tick.ask + 1 * POINT  # BUY_STOP above current price
         sl = price - sl_points * POINT
         tp = price + tp_points * POINT
-        order_type = mt5.ORDER_TYPE_BUY_LIMIT
+        order_type = mt5.ORDER_TYPE_BUY_STOP
     else:
-        price = tick.bid + 1 * POINT  # SELL_LIMIT must be ABOVE market
+        price = tick.bid - 1 * POINT  # SELL_STOP below current price
         sl = price + sl_points * POINT
         tp = price - tp_points * POINT
-        order_type = mt5.ORDER_TYPE_SELL_LIMIT
+        order_type = mt5.ORDER_TYPE_SELL_STOP
 
     request = {
         "action": mt5.TRADE_ACTION_PENDING,
@@ -130,15 +129,15 @@ def place_trade(signal, df):
         "tp": tp,
         "deviation": 20,
         "magic": MAGIC_NUMBER,
-        "comment": "XAUUSD M1 Scalp",
+        "comment": "XAUUSD M1 Scalper",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,  # IOC usually works for XAUUSD
+        "type_filling": mt5.ORDER_FILLING_IOC,
     }
 
     result = mt5.order_send(request)
 
     if result.retcode == mt5.TRADE_RETCODE_DONE:
-        print(f"{signal.upper()} pending order placed at {price}, SL={sl}, TP={tp}")
+        print(f"{signal.upper()} STOP order placed at {price}, SL={sl}, TP={tp}")
     else:
         print(f"Failed to place order: {result.retcode}, {result.comment}")
 
