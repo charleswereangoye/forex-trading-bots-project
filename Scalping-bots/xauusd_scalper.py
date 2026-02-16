@@ -6,12 +6,12 @@ from datetime import datetime
 # ==============================
 # CONFIGURATION
 # ==============================
-
 SYMBOL = "XAUUSD"
 TIMEFRAME = mt5.TIMEFRAME_M1
 MAGIC_NUMBER = 10001
 SPREAD_LIMIT = 100
 LOT_FIXED = 0.03
+
 BREAK_EVEN_BUFFER = 10        # points beyond entry
 ATR_PERIOD = 14
 ATR_MULTIPLIER_SL = 1.5       # SL = ATR * multiplier
@@ -23,7 +23,6 @@ TRAIL_DISTANCE = 30            # trail SL 30 points behind
 # ==============================
 # CONNECT TO MT5
 # ==============================
-
 if not mt5.initialize():
     print("MT5 initialization failed")
     quit()
@@ -53,12 +52,11 @@ print("Trade mode:", symbol_info.trade_mode)
 # ==============================
 # TRADE STATE TRACKER
 # ==============================
-trade_flags = {}  # {ticket: {'partial_closed': False, 'sl_moved_be': False}}
+trade_flags = {}  # {ticket: {'partial_closed': False, 'sl_moved_be': False, 'sl_set': False}}
 
 # ==============================
 # DATA FUNCTIONS
 # ==============================
-
 def get_data():
     rates = mt5.copy_rates_from_pos(SYMBOL, TIMEFRAME, 0, 200)
     if rates is None:
@@ -85,7 +83,6 @@ def check_signal(df):
 def spread_ok():
     tick = mt5.symbol_info_tick(SYMBOL)
     spread = (tick.ask - tick.bid) / POINT
-    print("Current Spread:", spread)
     return spread <= SPREAD_LIMIT
 
 def has_open_position():
@@ -95,31 +92,25 @@ def has_open_position():
 # ==============================
 # TRADE FUNCTIONS
 # ==============================
-
 def place_trade(signal, df):
     if not spread_ok():
         print("Spread too high.")
         return
 
     tick = mt5.symbol_info_tick(SYMBOL)
-    symbol_info = mt5.symbol_info(SYMBOL)
 
-    # ATR-based SL
-    atr = df['atr'].iloc[-1]
-    sl_points = max(int(atr * ATR_MULTIPLIER_SL), MIN_STOP)
-    tp_points = sl_points * TAKE_PROFIT_MULTIPLIER
-
-    # Pending Stop Orders
+    # Pending stop order prices
     if signal == "buy":
-        price = tick.ask + POINT  # BUY STOP above current price
-        sl = price - sl_points * POINT
-        tp = price + tp_points * POINT
+        price = tick.ask + POINT
         order_type = mt5.ORDER_TYPE_BUY_STOP
+        # dummy SL/TP far away to avoid immediate close
+        sl = price - 1000 * POINT
+        tp = price + 1000 * POINT
     else:
-        price = tick.bid - POINT  # SELL STOP below current price
-        sl = price + sl_points * POINT
-        tp = price - tp_points * POINT
+        price = tick.bid - POINT
         order_type = mt5.ORDER_TYPE_SELL_STOP
+        sl = price + 1000 * POINT
+        tp = price - 1000 * POINT
 
     request = {
         "action": mt5.TRADE_ACTION_PENDING,
@@ -138,14 +129,13 @@ def place_trade(signal, df):
 
     result = mt5.order_send(request)
     if result.retcode == mt5.TRADE_RETCODE_DONE:
-        print(f"{signal.upper()} STOP order placed at {price}, SL={sl}, TP={tp}")
+        print(f"{signal.upper()} STOP order placed at {price} (SL/TP set after execution)")
     else:
         print(f"Failed to place order: {result.retcode}, {result.comment}")
 
 # ==============================
 # TRADE MANAGEMENT
 # ==============================
-
 def manage_trades(df):
     positions = mt5.positions_get(symbol=SYMBOL)
     if positions is None:
@@ -163,30 +153,44 @@ def manage_trades(df):
         tp = pos.tp
         volume = pos.volume
 
-        # Initialize trade flags if first seen
+        # initialize flags
         if ticket not in trade_flags:
-            trade_flags[ticket] = {'partial_closed': False, 'sl_moved_be': False}
+            trade_flags[ticket] = {'partial_closed': False, 'sl_moved_be': False, 'sl_set': False}
 
-        # Determine current price
+        # 1️⃣ Set ATR-based SL & TP if dummy values
+        if not trade_flags[ticket]['sl_set'] and (sl > 100 * POINT or sl == 0.0):
+            sl_new = entry - sl_points * POINT if pos.type == mt5.ORDER_TYPE_BUY else entry + sl_points * POINT
+            tp_new = entry + sl_points * TAKE_PROFIT_MULTIPLIER * POINT if pos.type == mt5.ORDER_TYPE_BUY else entry - sl_points * TAKE_PROFIT_MULTIPLIER * POINT
+            mt5.order_send({
+                "action": mt5.TRADE_ACTION_SLTP,
+                "position": ticket,
+                "symbol": SYMBOL,
+                "sl": sl_new,
+                "tp": tp_new
+            })
+            trade_flags[ticket]['sl_set'] = True
+            print(f"{'BUY' if pos.type==mt5.ORDER_TYPE_BUY else 'SELL'} SL/TP set after execution")
+
+        # Determine current price & profit points
         current_price = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
         profit_points = (current_price - entry) / POINT if pos.type == mt5.ORDER_TYPE_BUY else (entry - current_price) / POINT
 
-        # 1️⃣ Move SL to Breakeven
+        # 2️⃣ Move SL to Breakeven
         if profit_points >= sl_points and not trade_flags[ticket]['sl_moved_be']:
             new_sl = entry + BREAK_EVEN_BUFFER * POINT if pos.type == mt5.ORDER_TYPE_BUY else entry - BREAK_EVEN_BUFFER * POINT
             mt5.order_send({"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": SYMBOL, "sl": new_sl, "tp": tp})
             trade_flags[ticket]['sl_moved_be'] = True
-            print(f"{'BUY' if pos.type == mt5.ORDER_TYPE_BUY else 'SELL'} moved to BE")
+            print(f"{'BUY' if pos.type==mt5.ORDER_TYPE_BUY else 'SELL'} moved to BE")
 
-        # 2️⃣ Partial close at 1R
+        # 3️⃣ Partial close at 1R
         if profit_points >= sl_points and not trade_flags[ticket]['partial_closed']:
             close_volume = volume * PARTIAL_CLOSE_RATIO
             order_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
             mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "position": ticket, "volume": close_volume, "type": order_type, "price": current_price, "deviation": 20})
             trade_flags[ticket]['partial_closed'] = True
-            print(f"{'BUY' if pos.type == mt5.ORDER_TYPE_BUY else 'SELL'} partial close executed")
+            print(f"{'BUY' if pos.type==mt5.ORDER_TYPE_BUY else 'SELL'} partial close executed")
 
-        # 3️⃣ Trailing stop after 1.5R
+        # 4️⃣ Trailing stop after 1.5R
         if profit_points >= trail_start:
             if pos.type == mt5.ORDER_TYPE_BUY:
                 new_sl = max(sl, current_price - TRAIL_DISTANCE * POINT)
@@ -194,12 +198,11 @@ def manage_trades(df):
                 new_sl = min(sl, current_price + TRAIL_DISTANCE * POINT)
             if new_sl != sl:
                 mt5.order_send({"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": SYMBOL, "sl": new_sl, "tp": tp})
-                print(f"{'BUY' if pos.type == mt5.ORDER_TYPE_BUY else 'SELL'} trailing SL updated")
+                print(f"{'BUY' if pos.type==mt5.ORDER_TYPE_BUY else 'SELL'} trailing SL updated")
 
 # ==============================
 # MAIN LOOP
 # ==============================
-
 print("Starting XAUUSD Scalper...")
 last_candle_time = None
 
@@ -210,7 +213,7 @@ while True:
             time.sleep(1)
             continue
 
-        manage_trades(df)  # handle breakeven, partial close, trailing stop
+        manage_trades(df)
 
         current_candle_time = df['time'].iloc[-1]
         if last_candle_time != current_candle_time:
@@ -228,4 +231,3 @@ while True:
     except Exception as e:
         print("Error:", e)
         time.sleep(1)
-
