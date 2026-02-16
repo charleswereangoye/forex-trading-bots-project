@@ -10,15 +10,15 @@ SYMBOL = "XAUUSD"
 TIMEFRAME = mt5.TIMEFRAME_M1
 MAGIC_NUMBER = 10001
 SPREAD_LIMIT = 100
-LOT_FIXED = 0.03
+LOT_FIXED = 0.02
 
 BREAK_EVEN_BUFFER = 10        # points beyond entry
 ATR_PERIOD = 14
 ATR_MULTIPLIER_SL = 1.5       # SL = ATR * multiplier
 TAKE_PROFIT_MULTIPLIER = 2    # TP = SL * multiplier
-PARTIAL_CLOSE_RATIO = 0.5     # close 50% at 1R
 TRAIL_START_MULTIPLIER = 1.5  # start trailing after 1.5R
 TRAIL_DISTANCE = 30            # trail SL 30 points behind
+SAFETY_BUFFER = 100            # extra points above broker minimum for SL/TP
 
 # ==============================
 # CONNECT TO MT5
@@ -48,11 +48,12 @@ if not symbol_info.visible:
 POINT = symbol_info.point
 MIN_STOP = symbol_info.trade_stops_level + 1
 print("Trade mode:", symbol_info.trade_mode)
+print("Broker min stop level:", symbol_info.trade_stops_level)
 
 # ==============================
 # TRADE STATE TRACKER
 # ==============================
-trade_flags = {}  # {ticket: {'partial_closed': False, 'sl_moved_be': False, 'sl_set': False}}
+trade_flags = {}  # {ticket: {'sl_moved_be': False}}
 
 # ==============================
 # DATA FUNCTIONS
@@ -85,35 +86,33 @@ def spread_ok():
     spread = (tick.ask - tick.bid) / POINT
     return spread <= SPREAD_LIMIT
 
-def has_open_position():
-    positions = mt5.positions_get(symbol=SYMBOL)
-    return positions is not None and len(positions) > 0
-
 # ==============================
-# TRADE FUNCTIONS
+# MARKET ORDER FUNCTION
 # ==============================
-def place_trade(signal, df):
+def place_market_order(signal, df):
     if not spread_ok():
-        print("Spread too high.")
+        print("Spread too high. Skipping trade.")
         return
 
     tick = mt5.symbol_info_tick(SYMBOL)
+    atr = df['atr'].iloc[-1]
+    sl_points = int(atr * ATR_MULTIPLIER_SL)
+    min_stop_distance = symbol_info.trade_stops_level * POINT + SAFETY_BUFFER
 
-    # Pending stop order prices
     if signal == "buy":
-        price = tick.ask + POINT
-        order_type = mt5.ORDER_TYPE_BUY_STOP
-        # dummy SL/TP far away to avoid immediate close
-        sl = price - 1000 * POINT
-        tp = price + 1000 * POINT
-    else:
-        price = tick.bid - POINT
-        order_type = mt5.ORDER_TYPE_SELL_STOP
-        sl = price + 1000 * POINT
-        tp = price - 1000 * POINT
+        price = tick.ask
+        sl = price - max(sl_points * POINT, min_stop_distance)
+        tp = price + max(sl_points * TAKE_PROFIT_MULTIPLIER * POINT, min_stop_distance)
+        order_type = mt5.ORDER_TYPE_BUY
+
+    else:  # sell
+        price = tick.bid
+        sl = price + max(sl_points * POINT, min_stop_distance)
+        tp = price - max(sl_points * TAKE_PROFIT_MULTIPLIER * POINT, min_stop_distance)
+        order_type = mt5.ORDER_TYPE_SELL
 
     request = {
-        "action": mt5.TRADE_ACTION_PENDING,
+        "action": mt5.TRADE_ACTION_DEAL,
         "symbol": SYMBOL,
         "volume": LOT_FIXED,
         "type": order_type,
@@ -122,16 +121,15 @@ def place_trade(signal, df):
         "tp": tp,
         "deviation": 20,
         "magic": MAGIC_NUMBER,
-        "comment": "XAUUSD M1 Scalp",
-        "type_time": mt5.ORDER_TIME_GTC,
+        "comment": "Market Order Scalp",
         "type_filling": mt5.ORDER_FILLING_FOK
     }
 
     result = mt5.order_send(request)
     if result.retcode == mt5.TRADE_RETCODE_DONE:
-        print(f"{signal.upper()} STOP order placed at {price} (SL/TP set after execution)")
+        print(f"{signal.upper()} MARKET order placed at {price} (SL: {sl}, TP: {tp})")
     else:
-        print(f"Failed to place order: {result.retcode}, {result.comment}")
+        print(f"Failed to place market order: {result.retcode}, {result.comment}")
 
 # ==============================
 # TRADE MANAGEMENT
@@ -151,46 +149,21 @@ def manage_trades(df):
         entry = pos.price_open
         sl = pos.sl
         tp = pos.tp
-        volume = pos.volume
 
-        # initialize flags
         if ticket not in trade_flags:
-            trade_flags[ticket] = {'partial_closed': False, 'sl_moved_be': False, 'sl_set': False}
+            trade_flags[ticket] = {'sl_moved_be': False}
 
-        # 1️⃣ Set ATR-based SL & TP if dummy values
-        if not trade_flags[ticket]['sl_set'] and (sl > 100 * POINT or sl == 0.0):
-            sl_new = entry - sl_points * POINT if pos.type == mt5.ORDER_TYPE_BUY else entry + sl_points * POINT
-            tp_new = entry + sl_points * TAKE_PROFIT_MULTIPLIER * POINT if pos.type == mt5.ORDER_TYPE_BUY else entry - sl_points * TAKE_PROFIT_MULTIPLIER * POINT
-            mt5.order_send({
-                "action": mt5.TRADE_ACTION_SLTP,
-                "position": ticket,
-                "symbol": SYMBOL,
-                "sl": sl_new,
-                "tp": tp_new
-            })
-            trade_flags[ticket]['sl_set'] = True
-            print(f"{'BUY' if pos.type==mt5.ORDER_TYPE_BUY else 'SELL'} SL/TP set after execution")
-
-        # Determine current price & profit points
+        # Move SL to breakeven at 1R
         current_price = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
         profit_points = (current_price - entry) / POINT if pos.type == mt5.ORDER_TYPE_BUY else (entry - current_price) / POINT
 
-        # 2️⃣ Move SL to Breakeven
         if profit_points >= sl_points and not trade_flags[ticket]['sl_moved_be']:
             new_sl = entry + BREAK_EVEN_BUFFER * POINT if pos.type == mt5.ORDER_TYPE_BUY else entry - BREAK_EVEN_BUFFER * POINT
             mt5.order_send({"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "symbol": SYMBOL, "sl": new_sl, "tp": tp})
             trade_flags[ticket]['sl_moved_be'] = True
-            print(f"{'BUY' if pos.type==mt5.ORDER_TYPE_BUY else 'SELL'} moved to BE")
+            print(f"{'BUY' if pos.type==mt5.ORDER_TYPE_BUY else 'SELL'} moved to BE at 1R")
 
-        # 3️⃣ Partial close at 1R
-        if profit_points >= sl_points and not trade_flags[ticket]['partial_closed']:
-            close_volume = volume * PARTIAL_CLOSE_RATIO
-            order_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
-            mt5.order_send({"action": mt5.TRADE_ACTION_DEAL, "position": ticket, "volume": close_volume, "type": order_type, "price": current_price, "deviation": 20})
-            trade_flags[ticket]['partial_closed'] = True
-            print(f"{'BUY' if pos.type==mt5.ORDER_TYPE_BUY else 'SELL'} partial close executed")
-
-        # 4️⃣ Trailing stop after 1.5R
+        # Trailing stop after 1.5R
         if profit_points >= trail_start:
             if pos.type == mt5.ORDER_TYPE_BUY:
                 new_sl = max(sl, current_price - TRAIL_DISTANCE * POINT)
@@ -203,7 +176,7 @@ def manage_trades(df):
 # ==============================
 # MAIN LOOP
 # ==============================
-print("Starting XAUUSD Scalper...")
+print("Starting XAUUSD Market Scalper...")
 last_candle_time = None
 
 while True:
@@ -224,7 +197,7 @@ while True:
             signal = check_signal(df)
             if signal:
                 print("Signal:", signal)
-                place_trade(signal, df)
+                place_market_order(signal, df)
 
         time.sleep(1)
 
