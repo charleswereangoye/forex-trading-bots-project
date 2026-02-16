@@ -103,27 +103,25 @@ def place_trade(signal, df):
     tick = mt5.symbol_info_tick(SYMBOL)
     symbol_info = mt5.symbol_info(SYMBOL)
 
-    # ATR-based stop loss
+    # ATR-based SL
     atr = df['atr'].iloc[-1]
-    sl_points = max(int(atr * ATR_MULTIPLIER_SL), symbol_info.trade_stops_level + 1)
-    tp_points = int(sl_points * TAKE_PROFIT_MULTIPLIER)
+    sl_points = max(int(atr * 1.5), symbol_info.trade_stops_level + 1)  # adjust 1.5x ATR
+    tp_points = sl_points * 2  # 2R TP
 
+    # Place slightly above/below current price
     if signal == "buy":
-        price = tick.ask
+        price = tick.ask + 1 * POINT  # buy limit slightly above
         sl = price - sl_points * POINT
         tp = price + tp_points * POINT
-        order_type = mt5.ORDER_TYPE_BUY
+        order_type = mt5.ORDER_TYPE_BUY_LIMIT
     else:
-        price = tick.bid
+        price = tick.bid - 1 * POINT  # sell limit slightly below
         sl = price + sl_points * POINT
         tp = price - tp_points * POINT
-        order_type = mt5.ORDER_TYPE_SELL
-
-    # Only use filling mode that usually works on XAUUSD
-    filling = mt5.ORDER_FILLING_IOC
+        order_type = mt5.ORDER_TYPE_SELL_LIMIT
 
     request = {
-        "action": mt5.TRADE_ACTION_DEAL,
+        "action": mt5.TRADE_ACTION_PENDING,
         "symbol": SYMBOL,
         "volume": LOT_FIXED,
         "type": order_type,
@@ -132,17 +130,18 @@ def place_trade(signal, df):
         "tp": tp,
         "deviation": 20,
         "magic": MAGIC_NUMBER,
-        "comment": "XAUUSD M1 Scalper",
+        "comment": "XAUUSD Scalper",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": filling,
+        "type_filling": mt5.ORDER_FILLING_IOC,
     }
 
     result = mt5.order_send(request)
 
     if result.retcode == mt5.TRADE_RETCODE_DONE:
-        print(f"{signal.upper()} trade executed at {price}, SL={sl}, TP={tp}")
+        print(f"{signal.upper()} pending order placed at {price}, SL={sl}, TP={tp}")
     else:
-        print(f"Trade failed: {result.retcode}, {result.comment}")
+        print(f"Failed to place order: {result.retcode}, {result.comment}")
+
 
 
 # ==============================
