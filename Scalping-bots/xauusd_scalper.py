@@ -1,6 +1,5 @@
 import MetaTrader5 as mt5
 import pandas as pd
-import numpy as np
 import time
 from datetime import datetime
 
@@ -10,11 +9,12 @@ from datetime import datetime
 
 SYMBOL = "XAUUSD"
 TIMEFRAME = mt5.TIMEFRAME_M1
-RISK_PERCENT = 0.01   # 1% risk
-STOP_LOSS_POINTS = 150  # 15 pips (adjust for broker)
-TAKE_PROFIT_POINTS = 300  # 30 pips
+RISK_PERCENT = 0.01
+STOP_LOSS_POINTS = 150
+TAKE_PROFIT_POINTS = 300
 MAGIC_NUMBER = 10001
-SPREAD_LIMIT = 50  # max allowed spread
+SPREAD_LIMIT = 100
+LOT_FIXED = 0.01   # Use fixed lot for stability (can switch to dynamic later)
 
 # ==============================
 # CONNECT TO MT5
@@ -33,7 +33,7 @@ if account_info is None:
 print(f"Connected to account: {account_info.login}")
 print(f"Balance: {account_info.balance}")
 
-# Ensure symbol is available
+# Ensure symbol exists
 symbol_info = mt5.symbol_info(SYMBOL)
 if symbol_info is None:
     print("Symbol not found")
@@ -43,12 +43,17 @@ if symbol_info is None:
 if not symbol_info.visible:
     mt5.symbol_select(SYMBOL, True)
 
+print("Trade mode:", symbol_info.trade_mode)
+
 # ==============================
 # FUNCTIONS
 # ==============================
 
 def get_data():
     rates = mt5.copy_rates_from_pos(SYMBOL, TIMEFRAME, 0, 200)
+    if rates is None:
+        return None
+
     df = pd.DataFrame(rates)
     df['ema20'] = df['close'].ewm(span=20).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
@@ -56,62 +61,53 @@ def get_data():
 
 
 def check_signal(df):
-    if df['ema20'].iloc[-2] < df['ema50'].iloc[-2] and df['ema20'].iloc[-1] > df['ema50'].iloc[-1]:
+    # Trend-based logic (better for scalping)
+    if df['ema20'].iloc[-1] > df['ema50'].iloc[-1]:
         return "buy"
-
-    elif df['ema20'].iloc[-2] > df['ema50'].iloc[-2] and df['ema20'].iloc[-1] < df['ema50'].iloc[-1]:
+    elif df['ema20'].iloc[-1] < df['ema50'].iloc[-1]:
         return "sell"
-
     return None
-
-
-def calculate_lot():
-    balance = mt5.account_info().balance
-    risk_amount = balance * RISK_PERCENT
-
-    tick_value = mt5.symbol_info(SYMBOL).trade_tick_value
-    tick_size = mt5.symbol_info(SYMBOL).trade_tick_size
-
-    lot = risk_amount / (STOP_LOSS_POINTS * tick_value / tick_size)
-
-    lot = max(0.01, round(lot, 2))
-    return lot
 
 
 def spread_ok():
     tick = mt5.symbol_info_tick(SYMBOL)
     spread = (tick.ask - tick.bid) / mt5.symbol_info(SYMBOL).point
+    print("Current Spread:", spread)
     return spread <= SPREAD_LIMIT
 
 
 def has_open_position():
     positions = mt5.positions_get(symbol=SYMBOL)
-    return positions is not None and len(positions) > 0
+    if positions is None:
+        return False
+    return len(positions) > 0
 
 
 def place_trade(signal):
 
     if not spread_ok():
-        print("Spread too high, skipping trade.")
+        print("Spread too high. Skipping trade.")
         return
 
     if has_open_position():
         print("Position already open.")
         return
 
-    lot = calculate_lot()
     tick = mt5.symbol_info_tick(SYMBOL)
+    symbol_info = mt5.symbol_info(SYMBOL)
+
+    lot = LOT_FIXED  # Use fixed lot for now
 
     if signal == "buy":
         price = tick.ask
-        sl = price - STOP_LOSS_POINTS * mt5.symbol_info(SYMBOL).point
-        tp = price + TAKE_PROFIT_POINTS * mt5.symbol_info(SYMBOL).point
+        sl = price - STOP_LOSS_POINTS * symbol_info.point
+        tp = price + TAKE_PROFIT_POINTS * symbol_info.point
         order_type = mt5.ORDER_TYPE_BUY
 
-    elif signal == "sell":
+    else:
         price = tick.bid
-        sl = price + STOP_LOSS_POINTS * mt5.symbol_info(SYMBOL).point
-        tp = price - TAKE_PROFIT_POINTS * mt5.symbol_info(SYMBOL).point
+        sl = price + STOP_LOSS_POINTS * symbol_info.point
+        tp = price - TAKE_PROFIT_POINTS * symbol_info.point
         order_type = mt5.ORDER_TYPE_SELL
 
     request = {
@@ -124,17 +120,20 @@ def place_trade(signal):
         "tp": tp,
         "deviation": 20,
         "magic": MAGIC_NUMBER,
-        "comment": "XAUUSD Scalper",
+        "comment": "XAUUSD M1 Scalper",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": mt5.ORDER_FILLING_RETURN,
     }
 
+    print("Sending Order...")
     result = mt5.order_send(request)
 
+    print("Order Result:", result)
+
     if result.retcode != mt5.TRADE_RETCODE_DONE:
-        print(f"Trade failed: {result.retcode}")
+        print("Trade failed:", result.comment)
     else:
-        print(f"{signal.upper()} trade placed successfully at {price}")
+        print(f"{signal.upper()} trade executed at {price}")
 
 
 # ==============================
@@ -143,17 +142,36 @@ def place_trade(signal):
 
 print("Starting XAUUSD Scalper...")
 
+last_candle_time = None
+
 while True:
     try:
         df = get_data()
-        signal = check_signal(df)
+        if df is None:
+            print("Failed to retrieve data")
+            time.sleep(1)
+            continue
 
-        if signal:
-            print(f"Signal detected: {signal} at {datetime.now()}")
-            place_trade(signal)
+        current_candle_time = df['time'].iloc[-1]
 
-        time.sleep(60)
+        # Trade only on new candle
+        if last_candle_time != current_candle_time:
+            last_candle_time = current_candle_time
+
+            print("New Candle Formed:", datetime.now())
+
+            signal = check_signal(df)
+
+            print("EMA20:", df['ema20'].iloc[-1],
+                  "EMA50:", df['ema50'].iloc[-1])
+
+            if signal:
+                print(f"Signal detected: {signal}")
+                place_trade(signal)
+
+        time.sleep(1)
 
     except Exception as e:
         print("Error:", e)
-        time.sleep(60)
+        time.sleep(1)
+
