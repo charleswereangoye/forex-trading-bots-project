@@ -103,19 +103,19 @@ def place_trade(signal, df):
     tick = mt5.symbol_info_tick(SYMBOL)
     symbol_info = mt5.symbol_info(SYMBOL)
 
-    # ATR-based SL
-    atr = df['atr'].iloc[-1]
-    sl_points = max(int(atr * 1.5), symbol_info.trade_stops_level + 1)  # adjust 1.5x ATR
-    tp_points = sl_points * 2  # 2R TP
+    # ATR-based stop loss
+    atr = df['atr'].iloc[-1] if 'atr' in df.columns else STOP_LOSS_POINTS
+    sl_points = max(int(atr * 1.5), symbol_info.trade_stops_level + 1)
+    tp_points = sl_points * 2  # 2R take profit
 
-    # Place slightly above/below current price
+    # Correct pending order prices
     if signal == "buy":
-        price = tick.ask + 1 * POINT  # buy limit slightly above
+        price = tick.ask - 1 * POINT  # BUY_LIMIT must be BELOW market
         sl = price - sl_points * POINT
         tp = price + tp_points * POINT
         order_type = mt5.ORDER_TYPE_BUY_LIMIT
     else:
-        price = tick.bid - 1 * POINT  # sell limit slightly below
+        price = tick.bid + 1 * POINT  # SELL_LIMIT must be ABOVE market
         sl = price + sl_points * POINT
         tp = price - tp_points * POINT
         order_type = mt5.ORDER_TYPE_SELL_LIMIT
@@ -130,9 +130,9 @@ def place_trade(signal, df):
         "tp": tp,
         "deviation": 20,
         "magic": MAGIC_NUMBER,
-        "comment": "XAUUSD Scalper",
+        "comment": "XAUUSD M1 Scalp",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": mt5.ORDER_FILLING_IOC,  # IOC usually works for XAUUSD
     }
 
     result = mt5.order_send(request)
@@ -141,7 +141,6 @@ def place_trade(signal, df):
         print(f"{signal.upper()} pending order placed at {price}, SL={sl}, TP={tp}")
     else:
         print(f"Failed to place order: {result.retcode}, {result.comment}")
-
 
 
 # ==============================
