@@ -92,7 +92,6 @@ def has_open_position():
 # ==============================
 
 def place_trade(signal, df):
-
     if not spread_ok():
         print("Spread too high.")
         return
@@ -102,8 +101,11 @@ def place_trade(signal, df):
         return
 
     tick = mt5.symbol_info_tick(SYMBOL)
+    symbol_info = mt5.symbol_info(SYMBOL)
+
+    # ATR-based stop loss
     atr = df['atr'].iloc[-1]
-    sl_points = int(atr * ATR_MULTIPLIER_SL)
+    sl_points = max(int(atr * ATR_MULTIPLIER_SL), symbol_info.trade_stops_level + 1)
     tp_points = int(sl_points * TAKE_PROFIT_MULTIPLIER)
 
     if signal == "buy":
@@ -117,33 +119,31 @@ def place_trade(signal, df):
         tp = price - tp_points * POINT
         order_type = mt5.ORDER_TYPE_SELL
 
-    filling_modes = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]
+    # Only use filling mode that usually works on XAUUSD
+    filling = mt5.ORDER_FILLING_IOC
 
-    for filling in filling_modes:
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": SYMBOL,
-            "volume": LOT_FIXED,
-            "type": order_type,
-            "price": price,
-            "sl": sl,
-            "tp": tp,
-            "deviation": 20,
-            "magic": MAGIC_NUMBER,
-            "comment": "XAUUSD M1 Scalper",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": filling,
-        }
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": SYMBOL,
+        "volume": LOT_FIXED,
+        "type": order_type,
+        "price": price,
+        "sl": sl,
+        "tp": tp,
+        "deviation": 20,
+        "magic": MAGIC_NUMBER,
+        "comment": "XAUUSD M1 Scalper",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": filling,
+    }
 
-        result = mt5.order_send(request)
+    result = mt5.order_send(request)
 
-        if result.retcode == mt5.TRADE_RETCODE_DONE:
-            print(f"{signal.upper()} trade executed at {price}, SL={sl}, TP={tp}")
-            return
-        else:
-            print("Filling mode failed:", filling, result.comment)
+    if result.retcode == mt5.TRADE_RETCODE_DONE:
+        print(f"{signal.upper()} trade executed at {price}, SL={sl}, TP={tp}")
+    else:
+        print(f"Trade failed: {result.retcode}, {result.comment}")
 
-    print("All filling modes failed.")
 
 # ==============================
 # TRADE MANAGEMENT
